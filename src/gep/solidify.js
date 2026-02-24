@@ -1232,9 +1232,15 @@ function solidify({ intent, summary, dryRun = false, rollbackOnFailure = true } 
               summary: capsule.summary || '',
             };
           }
+          if (reusedAssetId && sourceType === 'reference') {
+            publishGene.parent = reusedAssetId;
+          }
           publishGene.asset_id = computeAssetId(publishGene);
 
           var sanitizedCapsule = sanitizePayload(capsule);
+          if (reusedAssetId && sourceType === 'reference') {
+            sanitizedCapsule.parent = reusedAssetId;
+          }
           sanitizedCapsule.asset_id = computeAssetId(sanitizedCapsule);
 
           var sanitizedEvent = (event && event.type === 'EvolutionEvent') ? sanitizePayload(event) : null;
