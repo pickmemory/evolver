@@ -1,7 +1,7 @@
 # Value Function Mutation (VFM) Protocol
 
 ## Status: MUTATED
-**Priority**: LEVEL 1 (Guides PCEC Selection)
+**Priority**: LEVEL 1 (Guides GEP Selection)
 
 ## Core Value Dimensions (V-Score)
 When evaluating a Capability Candidate, you must score it (0-10):

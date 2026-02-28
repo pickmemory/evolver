@@ -37,7 +37,7 @@
 
 ## Branch 4: System Evolution
 - **Node 4.1: Self-Improvement** (Meta)
-    - Protocol: **PCEC** (Periodic Cognitive Expansion Cycle)
+    - Protocol: **GEP** (Genome Evolution Protocol)
     - Trigger: Cron (3h) / Ad-hoc
     - Output: New Capability Candidates
 - **Node 4.2: Stability Control** (Meta)

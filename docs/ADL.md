@@ -1,7 +1,7 @@
 # Anti-Degeneration Lock (ADL) Protocol
 
 ## Status: ENFORCED
-**Priority**: LEVEL 0 (Highest, overrides PCEC)
+**Priority**: LEVEL 0 (Highest, overrides GEP)
 
 ## Forbidden Evolution List
 1.  **Fake Intelligence**: Adding meaningless complex steps to "appear smart" is prohibited.
