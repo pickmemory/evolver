@@ -79,6 +79,10 @@ function selectGene(genes, signals, opts) {
   const driftEnabled = !!(opts && opts.driftEnabled);
   const preferredGeneId = opts && typeof opts.preferredGeneId === 'string' ? opts.preferredGeneId : null;
 
+  // Diversity-directed drift: capability_gaps from Hub heartbeat
+  var capabilityGaps = opts && Array.isArray(opts.capabilityGaps) ? opts.capabilityGaps : [];
+  var noveltyScore = opts && Number.isFinite(Number(opts.noveltyScore)) ? Number(opts.noveltyScore) : null;
+
   // Compute continuous drift intensity based on effective population size
   var driftIntensity = computeDriftIntensity({
     driftEnabled: driftEnabled,
@@ -99,7 +103,7 @@ function selectGene(genes, signals, opts) {
     .filter(x => x.score > 0)
     .sort((a, b) => b.score - a.score);
 
-  if (scored.length === 0) return { selected: null, alternatives: [], driftIntensity: driftIntensity };
+  if (scored.length === 0) return { selected: null, alternatives: [], driftIntensity: driftIntensity, driftMode: 'none' };
 
   // Memory graph preference: only override when the preferred gene is already a match candidate.
   if (preferredGeneId) {
@@ -111,27 +115,68 @@ function selectGene(genes, signals, opts) {
         selected: preferred.gene,
         alternatives: filteredRest.slice(0, 4).map(x => x.gene),
         driftIntensity: driftIntensity,
+        driftMode: 'memory_preferred',
       };
     }
   }
 
   // Low-efficiency suppression: do not repeat low-confidence paths unless drift is active.
   const filtered = useDrift ? scored : scored.filter(x => x.gene && !bannedGeneIds.has(x.gene.id));
-  if (filtered.length === 0) return { selected: null, alternatives: scored.slice(0, 4).map(x => x.gene), driftIntensity: driftIntensity };
+  if (filtered.length === 0) return { selected: null, alternatives: scored.slice(0, 4).map(x => x.gene), driftIntensity: driftIntensity, driftMode: 'none' };
 
-  // Stochastic selection under drift: with probability proportional to driftIntensity,
-  // pick a random gene from the top candidates instead of always picking the best.
+  // Diversity-directed drift: when capability gaps are available, prefer genes that
+  // cover gap areas instead of pure random selection. This replaces the blind
+  // random drift with an informed exploration toward under-covered capabilities.
   var selectedIdx = 0;
+  var driftMode = 'selection';
   if (driftIntensity > 0 && filtered.length > 1 && Math.random() < driftIntensity) {
-    // Weighted random selection from top candidates (favor higher-scoring but allow lower)
-    var topN = Math.min(filtered.length, Math.max(2, Math.ceil(filtered.length * driftIntensity)));
-    selectedIdx = Math.floor(Math.random() * topN);
+    if (capabilityGaps.length > 0) {
+      // Directed drift: score each candidate by how well its signals_match
+      // covers the capability gap dimensions
+      var gapScores = filtered.map(function(entry, idx) {
+        var g = entry.gene;
+        var patterns = Array.isArray(g.signals_match) ? g.signals_match : [];
+        var gapHits = 0;
+        for (var gi = 0; gi < capabilityGaps.length && gi < 5; gi++) {
+          var gapSignal = capabilityGaps[gi];
+          if (typeof gapSignal === 'string' && patterns.some(function(p) { return matchPatternToSignals(p, [gapSignal]); })) {
+            gapHits++;
+          }
+        }
+        return { idx: idx, gapHits: gapHits, baseScore: entry.score };
+      });
+
+      var hasGapHits = gapScores.some(function(gs) { return gs.gapHits > 0; });
+      if (hasGapHits) {
+        // Sort by gap coverage first, then by base score
+        gapScores.sort(function(a, b) {
+          return b.gapHits - a.gapHits || b.baseScore - a.baseScore;
+        });
+        selectedIdx = gapScores[0].idx;
+        driftMode = 'diversity_directed';
+      } else {
+        // No gap match: fall back to novelty-weighted random selection
+        var topN = Math.min(filtered.length, Math.max(2, Math.ceil(filtered.length * driftIntensity)));
+        // If novelty score is low (agent is too similar to others), increase exploration range
+        if (noveltyScore != null && noveltyScore < 0.3 && topN < filtered.length) {
+          topN = Math.min(filtered.length, topN + 1);
+        }
+        selectedIdx = Math.floor(Math.random() * topN);
+        driftMode = 'random_weighted';
+      }
+    } else {
+      // No capability gap data: original random drift behavior
+      var topN = Math.min(filtered.length, Math.max(2, Math.ceil(filtered.length * driftIntensity)));
+      selectedIdx = Math.floor(Math.random() * topN);
+      driftMode = 'random';
+    }
   }
 
   return {
     selected: filtered[selectedIdx].gene,
     alternatives: filtered.filter(function(_, i) { return i !== selectedIdx; }).slice(0, 4).map(x => x.gene),
     driftIntensity: driftIntensity,
+    driftMode: driftMode,
   };
 }
 

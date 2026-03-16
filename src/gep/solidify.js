@@ -20,6 +20,7 @@ const { buildValidationReport } = require('./validationReport');
 const { logAssetCall } = require('./assetCallLog');
 const { recordNarrative } = require('./narrativeMemory');
 const { isLlmReviewEnabled, runLlmReview } = require('./llmReview');
+const { buildExecutionTrace } = require('./executionTrace');
 
 function nowIso() {
   return new Date().toISOString();
@@ -1225,6 +1226,22 @@ function solidify({ intent, summary, dryRun = false, rollbackOnFailure = true } 
       memory_graph: memoryGraphPath(),
     },
   };
+  // Build desensitized execution trace for cross-agent experience sharing
+  const executionTrace = buildExecutionTrace({
+    gene: geneUsed,
+    mutation,
+    signals,
+    blast,
+    constraintCheck,
+    validation,
+    canary,
+    outcomeStatus,
+    startedAt: validation.startedAt,
+  });
+  if (executionTrace) {
+    event.execution_trace = executionTrace;
+  }
+
   event.asset_id = computeAssetId(event);
 
   let capsule = null;
