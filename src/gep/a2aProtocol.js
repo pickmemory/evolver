@@ -305,7 +305,9 @@ function unwrapAssetFromMessage(input) {
 function ensureDir(dir) {
   try {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  } catch (e) {}
+  } catch (e) {
+    console.warn('[a2aProtocol] ensureDir failed:', dir, e && e.message || e);
+  }
 }
 
 function defaultA2ADir() {
@@ -337,7 +339,9 @@ function fileTransportReceive(opts) {
           if (msg && msg.protocol === PROTOCOL_NAME) messages.push(msg);
         } catch (e) {}
       }
-    } catch (e) {}
+    } catch (e) {
+      console.warn('[a2aProtocol] Failed to read inbox file:', files[fi], e && e.message || e);
+    }
   }
   return messages;
 }
@@ -430,7 +434,9 @@ function _persistNodeSecret(secret) {
       fs.mkdirSync(NODE_ID_DIR, { recursive: true, mode: 0o700 });
     }
     fs.writeFileSync(NODE_SECRET_FILE, secret, { encoding: 'utf8', mode: 0o600 });
-  } catch {}
+  } catch (e) {
+    console.warn('[a2aProtocol] Failed to persist node secret:', e && e.message || e);
+  }
 }
 
 function getHubUrl() {
@@ -536,7 +542,9 @@ function sendHeartbeat() {
         meta.env_fingerprint = fp;
         _heartbeatFpSent = true;
       }
-    } catch {}
+    } catch (e) {
+      console.warn('[a2aProtocol] Failed to capture env fingerprint:', e && e.message || e);
+    }
   }
 
   if (Object.keys(meta).length > 0) {
