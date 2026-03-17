@@ -407,6 +407,8 @@ var _latestNoveltyHint = null;
 var _latestCapabilityGaps = [];
 var _pendingCommitmentUpdates = [];
 var _cachedHubNodeSecret = null;
+var _cachedHubNodeSecretAt = 0;
+var _SECRET_CACHE_TTL_MS = 60000;
 var _heartbeatIntervalMs = 0;
 var _heartbeatRunning = false;
 
@@ -464,6 +466,7 @@ function sendHelloToHub() {
         || null;
       if (secret && /^[a-f0-9]{64}$/i.test(secret)) {
         _cachedHubNodeSecret = secret;
+        _cachedHubNodeSecretAt = Date.now();
         _persistNodeSecret(secret);
       }
       return { ok: true, response: data };
@@ -473,10 +476,14 @@ function sendHelloToHub() {
 
 function getHubNodeSecret() {
   if (process.env.A2A_NODE_SECRET) return process.env.A2A_NODE_SECRET;
-  if (_cachedHubNodeSecret) return _cachedHubNodeSecret;
+  var now = Date.now();
+  if (_cachedHubNodeSecret && (now - _cachedHubNodeSecretAt) < _SECRET_CACHE_TTL_MS) {
+    return _cachedHubNodeSecret;
+  }
   var persisted = _loadPersistedNodeSecret();
   if (persisted) {
     _cachedHubNodeSecret = persisted;
+    _cachedHubNodeSecretAt = now;
     return persisted;
   }
   if (process.env.A2A_HUB_TOKEN) return process.env.A2A_HUB_TOKEN;
