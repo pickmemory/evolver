@@ -44,6 +44,35 @@ const { expandSignals } = require('./gep/learningSignals');
 
 const REPO_ROOT = getRepoRoot();
 
+// Idle-cycle gating: track last Hub fetch to avoid redundant API calls during saturation.
+// When evolver is saturated (no actionable signals), Hub calls are throttled to at most
+// once per EVOLVER_IDLE_FETCH_INTERVAL_MS (default 30 min) instead of every cycle.
+var _lastHubFetchMs = 0;
+
+function shouldSkipHubCalls(signals) {
+  if (!Array.isArray(signals)) return false;
+  var saturationIndicators = ['force_steady_state', 'evolution_saturation', 'empty_cycle_loop_detected'];
+  var hasSaturation = false;
+  for (var si = 0; si < saturationIndicators.length; si++) {
+    if (signals.indexOf(saturationIndicators[si]) !== -1) { hasSaturation = true; break; }
+  }
+  if (!hasSaturation) return false;
+
+  var actionablePatterns = [
+    'log_error', 'recurring_error', 'capability_gap', 'perf_bottleneck',
+    'external_task', 'bounty_task', 'overdue_task', 'urgent',
+    'unsupported_input_type',
+  ];
+  for (var ai = 0; ai < signals.length; ai++) {
+    var s = signals[ai];
+    if (actionablePatterns.indexOf(s) !== -1) return false;
+    if (s.indexOf('errsig:') === 0) return false;
+    if (s.indexOf('user_feature_request:') === 0 && s.length > 21) return false;
+    if (s.indexOf('user_improvement_suggestion:') === 0 && s.length > 28) return false;
+  }
+  return true;
+}
+
 // Load environment variables from repo root
 try {
   require('dotenv').config({ path: path.join(REPO_ROOT, '.env'), quiet: true });
@@ -1156,94 +1185,114 @@ async function run() {
     }
   }
 
+  // --- Idle-cycle gating: skip Hub API calls during saturation to save credits ---
+  var _idleFetchInterval = parseInt(String(process.env.EVOLVER_IDLE_FETCH_INTERVAL_MS || ''), 10);
+  if (!Number.isFinite(_idleFetchInterval) || _idleFetchInterval <= 0) _idleFetchInterval = 1800000;
+  var skipHubCalls = false;
+
+  if (shouldSkipHubCalls(signals)) {
+    var _elapsed = Date.now() - _lastHubFetchMs;
+    if (_lastHubFetchMs > 0 && _elapsed < _idleFetchInterval) {
+      skipHubCalls = true;
+      console.log('[IdleGating] Saturated with no actionable signals. Skipping Hub API calls (last fetch ' + Math.round(_elapsed / 1000) + 's ago, threshold ' + Math.round(_idleFetchInterval / 1000) + 's).');
+    } else {
+      console.log('[IdleGating] Saturated but fetch interval elapsed (' + Math.round((Date.now() - _lastHubFetchMs) / 1000) + 's). Performing periodic Hub check.');
+    }
+  }
+
   // --- Hub Task Auto-Claim (with proactive questions) ---
   // Generate questions from current context, piggyback them on the fetch call,
   // then pick the best task and auto-claim it.
   let activeTask = null;
   let proactiveQuestions = [];
-  try {
-    proactiveQuestions = generateQuestions({
-      signals,
-      recentEvents,
-      sessionTranscript: recentMasterLog,
-      memorySnippet: memorySnippet,
-    });
-    if (proactiveQuestions.length > 0) {
-      console.log(`[QuestionGenerator] Generated ${proactiveQuestions.length} proactive question(s).`);
+  if (!skipHubCalls) {
+    try {
+      proactiveQuestions = generateQuestions({
+        signals,
+        recentEvents,
+        sessionTranscript: recentMasterLog,
+        memorySnippet: memorySnippet,
+      });
+      if (proactiveQuestions.length > 0) {
+        console.log(`[QuestionGenerator] Generated ${proactiveQuestions.length} proactive question(s).`);
+      }
+    } catch (e) {
+      console.log(`[QuestionGenerator] Generation failed (non-fatal): ${e.message}`);
     }
-  } catch (e) {
-    console.log(`[QuestionGenerator] Generation failed (non-fatal): ${e.message}`);
-  }
 
-  // --- Auto GitHub Issue Reporter ---
-  // When persistent failures are detected, file an issue to the upstream repo
-  // with sanitized logs and environment info.
-  try {
-    await maybeReportIssue({
-      signals,
-      recentEvents,
-      sessionLog: recentMasterLog,
-    });
-  } catch (e) {
-    console.log(`[IssueReporter] Check failed (non-fatal): ${e.message}`);
+    // --- Auto GitHub Issue Reporter ---
+    // When persistent failures are detected, file an issue to the upstream repo
+    // with sanitized logs and environment info.
+    try {
+      await maybeReportIssue({
+        signals,
+        recentEvents,
+        sessionLog: recentMasterLog,
+      });
+    } catch (e) {
+      console.log(`[IssueReporter] Check failed (non-fatal): ${e.message}`);
+    }
   }
 
   // LessonL: lessons received from Hub during fetch
   let hubLessons = [];
 
-  try {
-    const fetchResult = await fetchTasks({ questions: proactiveQuestions });
-    const hubTasks = fetchResult.tasks || [];
+  if (!skipHubCalls) {
+    _lastHubFetchMs = Date.now();
+    try {
+      const fetchResult = await fetchTasks({ questions: proactiveQuestions });
+      const hubTasks = fetchResult.tasks || [];
 
-    if (fetchResult.questions_created && fetchResult.questions_created.length > 0) {
-      const created = fetchResult.questions_created.filter(function(q) { return !q.error; });
-      const failed = fetchResult.questions_created.filter(function(q) { return q.error; });
-      if (created.length > 0) {
-        console.log(`[QuestionGenerator] Hub accepted ${created.length} question(s) as bounties.`);
-      }
-      if (failed.length > 0) {
-        console.log(`[QuestionGenerator] Hub rejected ${failed.length} question(s): ${failed.map(function(q) { return q.error; }).join(', ')}`);
-      }
-    }
-
-    // LessonL: capture relevant lessons from Hub
-    if (Array.isArray(fetchResult.relevant_lessons) && fetchResult.relevant_lessons.length > 0) {
-      hubLessons = fetchResult.relevant_lessons;
-      console.log(`[LessonBank] Received ${hubLessons.length} lesson(s) from ecosystem.`);
-    }
-
-    if (hubTasks.length > 0) {
-      let taskMemoryEvents = [];
-      try {
-        const { tryReadMemoryGraphEvents } = require('./gep/memoryGraph');
-        taskMemoryEvents = tryReadMemoryGraphEvents(1000);
-      } catch (e) {
-        console.warn('[TaskReceiver] MemoryGraph read failed (task selection proceeds without history):', e && e.message || e);
-      }
-      const best = selectBestTask(hubTasks, taskMemoryEvents);
-      if (best) {
-        const alreadyClaimed = best.status === 'claimed';
-        let claimed = alreadyClaimed;
-        if (!alreadyClaimed) {
-          const commitDeadline = estimateCommitmentDeadline(best);
-          claimed = await claimTask(best.id || best.task_id, commitDeadline ? { commitment_deadline: commitDeadline } : undefined);
-          if (claimed && commitDeadline) {
-            best._commitment_deadline = commitDeadline;
-            console.log(`[Commitment] Deadline set: ${commitDeadline}`);
-          }
+      if (fetchResult.questions_created && fetchResult.questions_created.length > 0) {
+        const created = fetchResult.questions_created.filter(function(q) { return !q.error; });
+        const failed = fetchResult.questions_created.filter(function(q) { return q.error; });
+        if (created.length > 0) {
+          console.log(`[QuestionGenerator] Hub accepted ${created.length} question(s) as bounties.`);
         }
-        if (claimed) {
-          activeTask = best;
-          const taskSignals = taskToSignals(best);
-          for (const sig of taskSignals) {
-            if (!signals.includes(sig)) signals.unshift(sig);
-          }
-          console.log(`[TaskReceiver] ${alreadyClaimed ? 'Resuming' : 'Claimed'} task: "${best.title || best.id}" (${taskSignals.length} signals injected)`);
+        if (failed.length > 0) {
+          console.log(`[QuestionGenerator] Hub rejected ${failed.length} question(s): ${failed.map(function(q) { return q.error; }).join(', ')}`);
         }
       }
+
+      // LessonL: capture relevant lessons from Hub
+      if (Array.isArray(fetchResult.relevant_lessons) && fetchResult.relevant_lessons.length > 0) {
+        hubLessons = fetchResult.relevant_lessons;
+        console.log(`[LessonBank] Received ${hubLessons.length} lesson(s) from ecosystem.`);
+      }
+
+      if (hubTasks.length > 0) {
+        let taskMemoryEvents = [];
+        try {
+          const { tryReadMemoryGraphEvents } = require('./gep/memoryGraph');
+          taskMemoryEvents = tryReadMemoryGraphEvents(1000);
+        } catch (e) {
+          console.warn('[TaskReceiver] MemoryGraph read failed (task selection proceeds without history):', e && e.message || e);
+        }
+        const best = selectBestTask(hubTasks, taskMemoryEvents);
+        if (best) {
+          const alreadyClaimed = best.status === 'claimed';
+          let claimed = alreadyClaimed;
+          if (!alreadyClaimed) {
+            const commitDeadline = estimateCommitmentDeadline(best);
+            claimed = await claimTask(best.id || best.task_id, commitDeadline ? { commitment_deadline: commitDeadline } : undefined);
+            if (claimed && commitDeadline) {
+              best._commitment_deadline = commitDeadline;
+              console.log(`[Commitment] Deadline set: ${commitDeadline}`);
+            }
+          }
+          if (claimed) {
+            activeTask = best;
+            const taskSignals = taskToSignals(best);
+            for (const sig of taskSignals) {
+              if (!signals.includes(sig)) signals.unshift(sig);
+            }
+            console.log(`[TaskReceiver] ${alreadyClaimed ? 'Resuming' : 'Claimed'} task: "${best.title || best.id}" (${taskSignals.length} signals injected)`);
+          }
+        }
+      }
+    } catch (e) {
+      console.log(`[TaskReceiver] Fetch/claim failed (non-fatal): ${e.message}`);
     }
-  } catch (e) {
-    console.log(`[TaskReceiver] Fetch/claim failed (non-fatal): ${e.message}`);
   }
 
   // --- Commitment: check for overdue tasks from heartbeat ---
@@ -1428,16 +1477,21 @@ async function run() {
 
   // Search-First Evolution: query Hub for reusable solutions before local reasoning.
   let hubHit = null;
-  try {
-    hubHit = await hubSearch(signals, { timeoutMs: 8000 });
-    if (hubHit && hubHit.hit) {
-      console.log(`[SearchFirst] Hub hit: asset=${hubHit.asset_id}, score=${hubHit.score}, mode=${hubHit.mode}`);
-    } else {
-      console.log(`[SearchFirst] No hub match (reason: ${hubHit && hubHit.reason ? hubHit.reason : 'unknown'}). Proceeding with local evolution.`);
+  if (!skipHubCalls) {
+    try {
+      hubHit = await hubSearch(signals, { timeoutMs: 8000 });
+      if (hubHit && hubHit.hit) {
+        console.log(`[SearchFirst] Hub hit: asset=${hubHit.asset_id}, score=${hubHit.score}, mode=${hubHit.mode}`);
+      } else {
+        console.log(`[SearchFirst] No hub match (reason: ${hubHit && hubHit.reason ? hubHit.reason : 'unknown'}). Proceeding with local evolution.`);
+      }
+    } catch (e) {
+      console.log(`[SearchFirst] Hub search failed (non-fatal): ${e.message}`);
+      hubHit = { hit: false, reason: 'exception' };
     }
-  } catch (e) {
-    console.log(`[SearchFirst] Hub search failed (non-fatal): ${e.message}`);
-    hubHit = { hit: false, reason: 'exception' };
+  } else {
+    hubHit = { hit: false, reason: 'idle_skip' };
+    console.log('[IdleGating] hubSearch skipped (idle cycle).');
   }
 
   // Memory Graph reasoning: prefer high-confidence paths, suppress known low-success paths (unless drift is explicit).
@@ -1717,6 +1771,11 @@ async function run() {
     console.error(`[SolidifyState] Write failed: ${e.message}`);
   }
 
+  if (skipHubCalls) {
+    console.log('[IdleGating] Idle cycle complete. Prompt generation and bridge spawning skipped.');
+    return;
+  }
+
   const genesPreview = `\`\`\`json\n${JSON.stringify(genes.slice(0, 6), null, 2)}\n\`\`\``;
   const capsulesPreview = `\`\`\`json\n${JSON.stringify(capsules.slice(-3), null, 2)}\n\`\`\``;
 
@@ -1911,5 +1970,5 @@ ${mutationDirective}
   }
 }
 
-module.exports = { run, computeAdaptiveStrategyPolicy };
+module.exports = { run, computeAdaptiveStrategyPolicy, shouldSkipHubCalls };
 
