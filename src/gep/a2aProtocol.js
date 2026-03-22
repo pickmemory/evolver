@@ -337,7 +337,9 @@ function fileTransportReceive(opts) {
         try {
           var msg = JSON.parse(lines[li]);
           if (msg && msg.protocol === PROTOCOL_NAME) messages.push(msg);
-        } catch (e) {}
+        } catch (e) {
+          console.warn('[a2aProtocol] Malformed JSON line in inbox file ' + files[fi] + ' (line ' + (li + 1) + '):', e && e.message || e);
+        }
       }
     } catch (e) {
       console.warn('[a2aProtocol] Failed to read inbox file:', files[fi], e && e.message || e);
@@ -389,7 +391,10 @@ function httpTransportReceive(opts) {
       }
       return [];
     })
-    .catch(function () { return []; });
+    .catch(function (err) {
+      console.warn('[a2aProtocol] httpTransportReceive failed:', err && err.message || err);
+      return [];
+    });
 }
 
 function httpTransportList() {
@@ -502,7 +507,9 @@ function _scheduleNextHeartbeat(delayMs) {
   var delay = delayMs || _heartbeatIntervalMs;
   _heartbeatTimer = setTimeout(function () {
     if (!_heartbeatRunning) return;
-    sendHeartbeat().catch(function () {});
+    sendHeartbeat().catch(function (err) {
+      console.warn('[Heartbeat] Scheduled heartbeat failed:', err && err.message || err);
+    });
     _scheduleNextHeartbeat();
   }, delay);
   if (_heartbeatTimer.unref) _heartbeatTimer.unref();
@@ -704,7 +711,9 @@ function startHeartbeat(intervalMs) {
   sendHelloToHub().then(function (r) {
     if (r.ok) console.log('[Heartbeat] Registered with hub. Node: ' + getNodeId());
     else console.warn('[Heartbeat] Hello failed (will retry via heartbeat): ' + (r.error || 'unknown'));
-  }).catch(function () {}).then(function () {
+  }).catch(function (err) {
+    console.warn('[Heartbeat] Hello during startup failed:', err && err.message || err);
+  }).then(function () {
     if (!_heartbeatRunning) return;
     // First heartbeat after hello completes, with enough gap to avoid rate limit
     _scheduleNextHeartbeat(Math.max(30000, _heartbeatIntervalMs));
