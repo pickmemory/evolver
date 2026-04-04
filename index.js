@@ -128,6 +128,14 @@ async function main() {
         process.on('exit', releaseLock);
         process.on('SIGINT', () => { releaseLock(); process.exit(); });
         process.on('SIGTERM', () => { releaseLock(); process.exit(); });
+        process.on('uncaughtException', (err) => {
+          console.error('[FATAL] Uncaught exception:', err && err.stack ? err.stack : String(err));
+          releaseLock();
+          process.exit(1);
+        });
+        process.on('unhandledRejection', (reason) => {
+          console.error('[FATAL] Unhandled promise rejection:', reason && reason.stack ? reason.stack : String(reason));
+        });
 
         process.env.EVOLVE_LOOP = 'true';
         if (!process.env.EVOLVE_BRIDGE) {
@@ -717,7 +725,10 @@ async function main() {
 }
 
 if (require.main === module) {
-  main();
+  main().catch(function (err) {
+    console.error('[FATAL] Top-level error:', err && err.stack ? err.stack : String(err));
+    process.exitCode = 1;
+  });
 }
 
 module.exports = {
